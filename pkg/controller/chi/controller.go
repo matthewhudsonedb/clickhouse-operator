@@ -41,6 +41,7 @@ import (
 	typedCore "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/workqueue"
 
 	log "github.com/altinity/clickhouse-operator/pkg/announcer"
 	api "github.com/altinity/clickhouse-operator/pkg/apis/clickhouse.altinity.com/v1"
@@ -83,6 +84,9 @@ type Controller struct {
 	namer       interfaces.INameManager
 	ctrlLabeler *ctrlLabeler.Labeler
 	pvcDeleter  *volume.PVCDeleter
+
+	// abortRetry tracks per-CHI back-off for re-enqueuing aborted reconciles
+	abortRetry workqueue.RateLimiter
 }
 
 // NewController creates instance of Controller
@@ -128,6 +132,7 @@ func NewController(
 		kube:          kube,
 		ctrlLabeler:   ctrlLabeler.New(kube),
 		pvcDeleter:    volume.NewPVCDeleter(managers.NewNameManager(managers.NameManagerTypeClickHouse)),
+		abortRetry:    newAbortRetryLimiter(),
 	}
 	controller.initQueues()
 	controller.addEventHandlers(chopConfigInformerFactory, chopInformerFactory, kubeInformerFactory)

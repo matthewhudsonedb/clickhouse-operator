@@ -186,6 +186,7 @@ func (w *worker) reconcileCR(ctx context.Context, old, new *api.ClickHouseInstal
 		if errors.Is(err, common.ErrCRUDAbort) {
 			metrics.CRReconcilesAborted(ctx, new)
 		}
+		w.scheduleAbortRetry(new)
 	} else {
 		// Reconcile successful
 		// Post-process added items
@@ -203,6 +204,7 @@ func (w *worker) reconcileCR(ctx context.Context, old, new *api.ClickHouseInstal
 		w.addToMonitoring(new)
 		w.waitForIPAddresses(ctx, new)
 		w.finalizeReconcileAndMarkCompleted(ctx, new)
+		w.resetAbortRetry(new)
 
 		w.dropZKReplicas(ctx, new)
 
