@@ -42,6 +42,24 @@ func TestAbortRetryBackoff(t *testing.T) {
 	require.Equal(t, 10*time.Second, limiter.When("ns/other"), "back-off is per CHI")
 }
 
+// TestNextAbortRetryGivesUp verifies retries stop after abortRetryMaxAttempts and restart after Forget.
+func TestNextAbortRetryGivesUp(t *testing.T) {
+	limiter := newAbortRetryLimiter()
+	const key = "ns/chi"
+
+	for i := 1; i <= abortRetryMaxAttempts; i++ {
+		_, ok := nextAbortRetry(limiter, key)
+		require.True(t, ok, "attempt %d", i)
+	}
+	_, ok := nextAbortRetry(limiter, key)
+	require.False(t, ok, "must give up after %d attempts", abortRetryMaxAttempts)
+
+	limiter.Forget(key)
+	d, ok := nextAbortRetry(limiter, key)
+	require.True(t, ok, "a completed reconcile re-arms retries")
+	require.Equal(t, abortRetryBaseDelay, d)
+}
+
 // TestScheduleAbortRetrySkips verifies no back-off is consumed (and nothing is scheduled) for a CHI
 // that is not an auto-recovery target.
 func TestScheduleAbortRetrySkips(t *testing.T) {

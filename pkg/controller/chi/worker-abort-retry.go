@@ -26,15 +26,26 @@ import (
 	"github.com/altinity/clickhouse-operator/pkg/util"
 )
 
-// Back-off for re-enqueuing a CHI whose reconcile ended Aborted: 10s, 20s, 40s ... capped at 5m.
-// The CHK controller gets the same behaviour from controller-runtime by returning the error.
+// Back-off for re-enqueuing a CHI whose reconcile ended Aborted: 10s, 20s, 40s, 80s, 160s, then give
+// up (~5m in total). That outlasts transient failures; past it the failure is persistent, and each
+// retry is a full reconcile of a live cluster, so stop and leave the CHI Aborted as before. The CHK
+// controller gets error back-off from controller-runtime by returning the error.
 const (
-	abortRetryBaseDelay = 10 * time.Second
-	abortRetryMaxDelay  = 5 * time.Minute
+	abortRetryBaseDelay   = 10 * time.Second
+	abortRetryMaxDelay    = 5 * time.Minute
+	abortRetryMaxAttempts = 5
 )
 
 func newAbortRetryLimiter() workqueue.RateLimiter {
 	return workqueue.NewItemExponentialFailureRateLimiter(abortRetryBaseDelay, abortRetryMaxDelay)
+}
+
+// nextAbortRetry returns the delay before the next retry of key, or false once the attempts are used up.
+func nextAbortRetry(limiter workqueue.RateLimiter, key string) (time.Duration, bool) {
+	if limiter.NumRequeues(key) >= abortRetryMaxAttempts {
+		return 0, false
+	}
+	return limiter.When(key), true
 }
 
 // scheduleAbortRetry re-enqueues a CHI after its reconcile ended Aborted.
@@ -48,7 +59,13 @@ func (w *worker) scheduleAbortRetry(cr *api.ClickHouseInstallation) {
 	if w.c.abortRetry == nil || !shouldTriggerAutoRecovery(cr) {
 		return
 	}
-	delay := w.c.abortRetry.When(util.NamespaceNameString(cr))
+	delay, ok := nextAbortRetry(w.c.abortRetry, util.NamespaceNameString(cr))
+	if !ok {
+		w.a.V(1).M(cr).F().
+			WithEvent(cr, a.EventActionReconcile, a.EventReasonReconcileFailed).
+			Warning("Reconcile aborted - giving up re-enqueuing CHI %s after %d attempts", util.NamespaceNameString(cr), abortRetryMaxAttempts)
+		return
+	}
 	w.a.V(1).M(cr).F().
 		WithEvent(cr, a.EventActionReconcile, a.EventReasonAutoRecoveryTriggered).
 		Info("Reconcile aborted - re-enqueuing CHI %s in %s", util.NamespaceNameString(cr), delay)
