@@ -15,6 +15,8 @@
 package chi
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -22,6 +24,7 @@ import (
 	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	api "github.com/altinity/clickhouse-operator/pkg/apis/clickhouse.altinity.com/v1"
+	"github.com/altinity/clickhouse-operator/pkg/interfaces"
 )
 
 // TestAbortRetryBackoff pins the re-enqueue schedule: doubling from 10s, capped at 5m, reset on success.
@@ -52,4 +55,50 @@ func TestScheduleAbortRetrySkips(t *testing.T) {
 
 	// Controllers built without a limiter (tests) must not panic.
 	(&worker{c: &Controller{}}).scheduleAbortRetry(cr)
+}
+
+// abortFakeKube exposes CR() only; any other accessor panics on the nil embedded IKube.
+type abortFakeKube struct {
+	interfaces.IKube
+	cr interfaces.IKubeCR
+}
+
+func (k *abortFakeKube) CR() interfaces.IKubeCR { return k.cr }
+
+type abortFakeCR struct {
+	interfaces.IKubeCR
+	chi *api.ClickHouseInstallation
+	err error
+}
+
+func (f *abortFakeCR) Get(_ context.Context, _, _ string) (api.ICustomResource, error) {
+	return f.chi, f.err
+}
+
+// TestStillAborted verifies a retry timer only enqueues if the CHI is still Aborted when it fires:
+// enqueuing a CHI mid-reconcile cancels that reconcile.
+func TestStillAborted(t *testing.T) {
+	chiWith := func(status string) *api.ClickHouseInstallation {
+		cr := &api.ClickHouseInstallation{ObjectMeta: meta.ObjectMeta{Namespace: "ns", Name: "chi"}}
+		cr.EnsureStatus().Status = status
+		return cr
+	}
+	tests := []struct {
+		name string
+		fake *abortFakeCR
+		want bool
+	}{
+		{"still Aborted - enqueue", &abortFakeCR{chi: chiWith(api.StatusAborted)}, true},
+		{"InProgress (edited since) - skip", &abortFakeCR{chi: chiWith(api.StatusInProgress)}, false},
+		{"Completed - skip", &abortFakeCR{chi: chiWith(api.StatusCompleted)}, false},
+		{"Get fails (e.g. deleted) - skip", &abortFakeCR{err: errors.New("not found")}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := &worker{c: &Controller{kube: &abortFakeKube{cr: tt.fake}}}
+			cr, ok := w.stillAborted(context.Background(), "ns", "chi")
+			require.Equal(t, tt.want, ok)
+			require.Equal(t, tt.want, cr != nil)
+		})
+	}
 }

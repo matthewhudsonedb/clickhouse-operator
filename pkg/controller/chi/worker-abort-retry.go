@@ -15,6 +15,7 @@
 package chi
 
 import (
+	"context"
 	"time"
 
 	"k8s.io/client-go/util/workqueue"
@@ -52,10 +53,29 @@ func (w *worker) scheduleAbortRetry(cr *api.ClickHouseInstallation) {
 		WithEvent(cr, a.EventActionReconcile, a.EventReasonAutoRecoveryTriggered).
 		Info("Reconcile aborted - re-enqueuing CHI %s in %s", util.NamespaceNameString(cr), delay)
 
-	// ReconcileAdd, like the pod-Ready recovery: it needs no spec diff and updateCHI re-reads the CR.
+	namespace, name := cr.GetNamespace(), cr.GetName()
 	time.AfterFunc(delay, func() {
-		w.c.enqueueObject(cmd_queue.NewReconcileCHI(cmd_queue.ReconcileAdd, nil, cr))
+		if cur, ok := w.stillAborted(context.Background(), namespace, name); ok {
+			// ReconcileAdd, like the pod-Ready recovery: it needs no spec diff.
+			w.c.enqueueObject(cmd_queue.NewReconcileCHI(cmd_queue.ReconcileAdd, nil, cur))
+		}
 	})
+}
+
+// stillAborted re-reads the CHI when the retry timer fires. Enqueuing a CHI whose reconcile is in
+// progress cancels that reconcile, so a timer that outlived its abort - the CHI was edited or
+// recovered in the meantime - must not enqueue.
+func (w *worker) stillAborted(ctx context.Context, namespace, name string) (*api.ClickHouseInstallation, bool) {
+	obj, err := w.c.kube.CR().Get(ctx, namespace, name)
+	if err != nil {
+		return nil, false
+	}
+	cr, ok := obj.(*api.ClickHouseInstallation)
+	if !ok || !shouldTriggerAutoRecovery(cr) {
+		w.a.V(1).M(obj).F().Info("CHI %s/%s no longer Aborted - skipping re-enqueue", namespace, name)
+		return nil, false
+	}
+	return cr, true
 }
 
 // resetAbortRetry clears the back-off once a reconcile completes.
